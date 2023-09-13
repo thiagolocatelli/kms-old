@@ -21,6 +21,7 @@ class Kms:
         # Initialization
         self.feeder_sensors = []
         self.feeder_steppers = []
+        self.feeder_servos = []
         self.split_sensors = []
 
         # KMS parameters
@@ -46,31 +47,29 @@ class Kms:
         self.toolhead = self.printer.lookup_object('toolhead')        
 
     def _setup_kms_hardware(self, config):
-        # Load all feeder sensors
-        for idx_sensor in (0, self.number_of_tools - 1): 
-            feed_sensor = self.printer.lookup_object("filament_switch_sensor kms_switch_sensor_T%d" % (idx_sensor), None)
+        # Load all feeder sensors, steppers and servos
+        for idx_tool in range(self.number_of_tools): 
+            feed_sensor = self.printer.lookup_object("filament_switch_sensor kms_switch_sensor_T%d" % (idx_tool), None)
             if feed_sensor is None:
-                raise self.config.error("Missing [filament_switch_sensor kms_switch_sensor_T%d] section in kms_hardware.cfg" % (idx_sensor))  
+                raise self.config.error("Missing [filament_switch_sensor kms_switch_sensor_T%d] section in kms_hardware.cfg" % (idx_tool))  
             self.feeder_sensors.append(feed_sensor)
 
-        # Load all feeder steppers
-        for idx_sensor in (0, self.number_of_tools - 1): 
-            feed_stepper = self.printer.lookup_object("manual_extruder_stepper kms_mmu_feeder_T%d" % (idx_sensor), None)
+            feed_stepper = self.printer.lookup_object("manual_extruder_stepper kms_mmu_feeder_T%d" % (idx_tool), None)
             if feed_stepper is None:
-                raise self.config.error("Missing [manual_extruder_stepper kms_mmu_feeder_T%d] section in kms_hardware.cfg" % (idx_sensor))  
+                raise self.config.error("Missing [manual_extruder_stepper kms_mmu_feeder_T%d] section in kms_hardware.cfg" % (idx_tool))  
             self.feeder_steppers.append(feed_stepper)
 
+            feed_servo = self.printer.lookup_object("mmu_servo kms_feeder_servo_T%d" % (idx_tool), None)
+            if feed_servo is None:
+                raise self.config.error("Missing [mmu_servo kms_feeder_servo_T%d] section in kms_hardware.cfg" % (idx_tool))  
+            self.feeder_servos.append(feed_servo)
+
         # Load all splitter sensors
-        for index_y_sensor in range(0, self.number_of_units):
-            splitter_sensor = self.printer.lookup_object("filament_switch_sensor kms_switch_sensor_splitter_%d" % (index_y_sensor + 1), None)
+        for idx_y_sensor in range(self.number_of_units):
+            splitter_sensor = self.printer.lookup_object("filament_switch_sensor kms_switch_sensor_splitter_%d" % (idx_y_sensor + 1), None)
             if splitter_sensor is None:
-                raise self.config.error("Missing [filament_switch_sensor kms_switch_sensor_splitter_%d] section in kms_hardware.cfg" % (index_y_sensor + 1))  
+                raise self.config.error("Missing [filament_switch_sensor kms_switch_sensor_splitter_%d] section in kms_hardware.cfg" % (idx_y_sensor + 1))  
             self.split_sensors.append(splitter_sensor)
-
-        # self.splitter_sensor = self.printer.lookup_object("filament_switch_sensor kms_switch_sensor_splitter_1", None)
-        # if self.splitter_sensor is None:
-        #     raise self.config.error("Missing [filament_switch_sensor kms_switch_sensor_splitter_1] section in kms_hardware.cfg")
-
 
     cmd_KMS_HELP_help = "Display the complete set of MMU commands and function"
     def cmd_KMS_HELP(self, gcmd):
@@ -121,7 +120,6 @@ class Kms:
 
     def _update_status_startup(self):
         self.gcode.run_script_from_command("FLICKER")
-
         # Set the correct neopixel color for each feeder at startup
         for feeder_sensor_idx, feeder_sensor in enumerate(self.feeder_sensors):
             if feeder_sensor.runout_helper.filament_present:
