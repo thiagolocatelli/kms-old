@@ -54,10 +54,7 @@ class Kms:
         self.reactor = self.printer.get_reactor()
 
         # Initialization
-        self.feeders = []
-        self.feeder_sensors = []
-        self.feeder_steppers = []
-        self.feeder_servos = []
+        self.feeders: list[KMSFeeder] = []
         self.split_sensors = []
 
         # KMS parameters
@@ -89,25 +86,22 @@ class Kms:
         self.toolhead = self.printer.lookup_object('toolhead') 
         self._setup_kms_hardware()     
 
+
     def _setup_kms_hardware(self):
         # Load all feeder sensors, steppers and servos
         for idx_tool in range(self.number_of_tools): 
             feed_sensor = self.printer.lookup_object("filament_switch_sensor kms_switch_sensor_T%d" % (idx_tool), None)
             if feed_sensor is None:
                 raise self.config.error("Missing [filament_switch_sensor kms_switch_sensor_T%d] section in kms_hardware.cfg" % (idx_tool))  
-            self.feeder_sensors.append(feed_sensor)
 
             feed_stepper = self.printer.lookup_object("manual_extruder_stepper kms_mmu_feeder_T%d" % (idx_tool), None)
             if feed_stepper is None:
                 raise self.config.error("Missing [manual_extruder_stepper kms_mmu_feeder_T%d] section in kms_hardware.cfg" % (idx_tool))  
-            self.feeder_steppers.append(feed_stepper)
 
             feed_servo = self.printer.lookup_object("mmu_servo kms_feeder_servo_T%d" % (idx_tool), None)
             if feed_servo is None:
                 raise self.config.error("Missing [mmu_servo kms_feeder_servo_T%d] section in kms_hardware.cfg" % (idx_tool))  
-            self.feeder_servos.append(KMSServo(feed_servo, self.toolhead))
             self.feeders.append(KMSFeeder('T{}'.format(idx_tool), self.toolhead, feed_sensor, feed_stepper, KMSServo(feed_servo, self.toolhead)))
-            #self.gcode.respond_info("Preparing tool = %s" % ('T{}'.format(idx_tool))) 
 
         # Load all splitter sensors
         for idx_y_sensor in range(self.number_of_units):
@@ -116,9 +110,11 @@ class Kms:
                 raise self.config.error("Missing [filament_switch_sensor kms_switch_sensor_splitter_%d] section in kms_hardware.cfg" % (idx_y_sensor + 1))  
             self.split_sensors.append(splitter_sensor)
 
+
     cmd_KMS_HELP_help = "Display the complete set of MMU commands and function"
     def cmd_KMS_HELP(self, gcmd):
         self.gcode.respond_info("KMS_HELP test")
+
 
     cmd_KMS_CHANGE_TOOL_help = "Move the filament to the Y splitter and retract"
     def cmd_KMS_CHANGE_TOOL(self, gcmd):   
@@ -127,7 +123,8 @@ class Kms:
             raise self.gcode.error("_KMS_CHANGE_TOOL macro requires TOOL parameter")
         self.gcode.respond_info("KMS_CHANGE_TOOL tool = %s" % (tool_name)) 
 
-    cmd_SELECT_TOOL_help = "Load filament from Trad Rack into the toolhead with T<index> commands"
+
+    cmd_SELECT_TOOL_help = "Load filament from KMS into the toolhead with T<index> commands"
     def cmd_SELECT_TOOL(self, gcmd):
         tool = int(gcmd.get_command().partition('T')[2])
         self.gcode.respond_info("cmd_SELECT_TOOL -> tool T%d" % tool)
@@ -141,30 +138,23 @@ class Kms:
         filament_loaded = 0
 
         self.gcode.respond_info("KMS_LOAD_TOOL tool_name: T%s, filament_present: %s" % (tool_name, self._check_splitter_sensor(tool_name)))
-        #self.gcode.run_script_from_command("%s TOOL=T%s" % (self.MACRO_SERVO_DOWN, tool_name))
-        #feeder_servo = self.feeder_servos[tool_name]
-        #self._servo_down(feeder_servo)
         feeder = self.feeders[tool_name]
         feeder._servo_down(self.servo_angle_down, self.servo_wait)
 
-        #feeder_stepper = self.printer.lookup_object(("manual_extruder_stepper kms_mmu_feeder_T%s" % (tool_name)), None)
-        feeder_stepper = self.feeder_steppers[tool_name]
-        feeder_stepper.do_set_position(0.)
-        feeder_stepper.do_move(self.load_initial_length, self.load_moves_speed, self.load_moves_accel, False)
+        feeder.stepper.do_set_position(0.)
+        feeder.stepper.do_move(self.load_initial_length, self.load_moves_speed, self.load_moves_accel, False)
         self.toolhead.dwell(0.2)
         for index in range(1, 40):
             if self._check_splitter_sensor(tool_name) == 1:
                 filament_loaded = 1
-                feeder_stepper.do_set_position(0.)
-                feeder_stepper.do_move(-1 * self.load_retraction_length, self.load_moves_speed, self.load_moves_accel, False)
+                feeder.stepper.do_set_position(0.)
+                feeder.stepper.do_move(-1 * self.load_retraction_length, self.load_moves_speed, self.load_moves_accel, False)
                 self.toolhead.wait_moves()
                 break
             else:
-                feeder_stepper.do_move(float(self.load_initial_length + (index * self.load_incremental_length)), self.load_moves_speed, self.load_moves_accel, False)
+                feeder.stepper.do_move(float(self.load_initial_length + (index * self.load_incremental_length)), self.load_moves_speed, self.load_moves_accel, False)
                 self.toolhead.wait_moves()
 
-        #self.gcode.run_script_from_command("%s TOOL=T%s" % (self.MACRO_SERVO_UP, tool_name))
-        #self._servo_up(feeder_servo)
         feeder._servo_up(self.servo_angle_up)
         if filament_loaded:
             self.gcode.run_script_from_command("%s TOOL=T%s" % (self.MACRO_KMS_TOOL_STATUS_READY, tool_name))
@@ -173,7 +163,6 @@ class Kms:
 
 
     def _check_splitter_sensor(self, tool_name):
-        #if self.splitter_sensor.runout_helper.filament_present:
         if self.split_sensors[int(int(tool_name) / 4)].runout_helper.filament_present:
             return 1
         else:
@@ -182,25 +171,12 @@ class Kms:
 
     def _update_status_startup(self):
         self.gcode.run_script_from_command("FLICKER")
-        #self.gcode.respond_info("self.feeders length: %d" % len(self.feeders))
-        # Set the correct neopixel color for each feeder at startup
-        for feeder_sensor_idx, feeder_sensor in enumerate(self.feeder_sensors):
-            if feeder_sensor.runout_helper.filament_present:
-                self.gcode.run_script_from_command("%s TOOL=T%s" % (self.MACRO_KMS_TOOL_STATUS_READY, feeder_sensor_idx))
+        self.gcode.respond_info("self.feeders length: %d" % len(self.feeders))
+        for feeder_idx, feeder in enumerate(self.feeders):
+            if feeder.sensor.runout_helper.filament_present:
+                self.gcode.run_script_from_command("%s TOOL=T%s" % (self.MACRO_KMS_TOOL_STATUS_READY, feeder_idx))
             else:
-                self.gcode.run_script_from_command("%s TOOL=T%s" % (self.MACRO_KMS_TOOL_STATUS_FREE, feeder_sensor_idx))
-
-
-    # def _servo_up(self, servo: KMSServo, wait_moves=True, print_time=None):
-    #     if wait_moves:
-    #         self.toolhead.wait_moves()
-    #     servo.set_servo(angle=self.servo_angle_up, print_time=print_time)
-
-    # def _servo_down(self, servo: KMSServo, toolhead_dwell=False):
-    #     self.toolhead.wait_moves()
-    #     servo.set_servo(angle = self.servo_angle_down)
-    #     if toolhead_dwell:
-    #         self.toolhead.dwell(self.servo_wait)
+                self.gcode.run_script_from_command("%s TOOL=T%s" % (self.MACRO_KMS_TOOL_STATUS_FREE, feeder_idx))
 
 
 def load_config(config):
