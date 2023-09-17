@@ -13,6 +13,26 @@ class KMSServo:
         else:
             self.servo._set_pwm(print_time, self.servo._get_pwm_from_angle(angle))
 
+
+class KMSFeeder:
+    def __init__(self, name: str, toolhead, sensor, stepper, servo:KMSServo):
+        self.name = name
+        self.toolhead = toolhead
+        self.sensor = sensor
+        self.stepper = stepper
+        self.servo = servo
+
+    def _servo_up(self, servo_angle_up, wait_moves=True, print_time=None):
+        if wait_moves:
+            self.toolhead.wait_moves()
+        self.servo.set_servo(angle=servo_angle_up, print_time=print_time)
+
+    def _servo_down(self, servo_angle_down, servo_wait, toolhead_dwell=False):
+        self.toolhead.wait_moves()
+        self.servo.set_servo(angle=servo_angle_down)
+        if toolhead_dwell:
+            self.toolhead.dwell(servo_wait)
+
 class Kms:
 
     # Neopixel Macros
@@ -34,6 +54,7 @@ class Kms:
         self.reactor = self.printer.get_reactor()
 
         # Initialization
+        self.feeders = []
         self.feeder_sensors = []
         self.feeder_steppers = []
         self.feeder_servos = []
@@ -50,8 +71,9 @@ class Kms:
         self.load_moves_accel = kms_config.getfloat('load_moves_accel', 400., above=0.)
         self.servo_angle_up = kms_config.getint('servo_angle_up', 30, minval=1)
         self.servo_angle_down = kms_config.getint('servo_angle_down', 95, minval=1)
+        self.servo_wait = config.getfloat('servo_wait_ms', default=500., above=0.) / 1000.
 
-
+        # Register Klipper event handlers
         self.printer.register_event_handler("klippy:connect", self.handle_connect)
         self.printer.register_event_handler("klippy:ready", self._update_status_startup)
 
@@ -84,6 +106,8 @@ class Kms:
             if feed_servo is None:
                 raise self.config.error("Missing [mmu_servo kms_feeder_servo_T%d] section in kms_hardware.cfg" % (idx_tool))  
             self.feeder_servos.append(KMSServo(feed_servo, self.toolhead))
+            self.feeders.append(KMSFeeder('T{}'.format(idx_tool), self.toolhead, feed_sensor, feed_stepper, KMSServo(feed_servo, self.toolhead)))
+            #self.gcode.respond_info("Preparing tool = %s" % ('T{}'.format(idx_tool))) 
 
         # Load all splitter sensors
         for idx_y_sensor in range(self.number_of_units):
@@ -118,8 +142,10 @@ class Kms:
 
         self.gcode.respond_info("KMS_LOAD_TOOL tool_name: T%s, filament_present: %s" % (tool_name, self._check_splitter_sensor(tool_name)))
         #self.gcode.run_script_from_command("%s TOOL=T%s" % (self.MACRO_SERVO_DOWN, tool_name))
-        feeder_servo = self.feeder_servos[tool_name]
-        self._servo_down(feeder_servo)
+        #feeder_servo = self.feeder_servos[tool_name]
+        #self._servo_down(feeder_servo)
+        feeder = self.feeders[tool_name]
+        feeder._servo_down(self.servo_angle_down, self.servo_wait)
 
         #feeder_stepper = self.printer.lookup_object(("manual_extruder_stepper kms_mmu_feeder_T%s" % (tool_name)), None)
         feeder_stepper = self.feeder_steppers[tool_name]
@@ -138,7 +164,8 @@ class Kms:
                 self.toolhead.wait_moves()
 
         #self.gcode.run_script_from_command("%s TOOL=T%s" % (self.MACRO_SERVO_UP, tool_name))
-        self._servo_up(feeder_servo)
+        #self._servo_up(feeder_servo)
+        feeder._servo_up(self.servo_angle_up)
         if filament_loaded:
             self.gcode.run_script_from_command("%s TOOL=T%s" % (self.MACRO_KMS_TOOL_STATUS_READY, tool_name))
         else:
@@ -155,6 +182,7 @@ class Kms:
 
     def _update_status_startup(self):
         self.gcode.run_script_from_command("FLICKER")
+        #self.gcode.respond_info("self.feeders length: %d" % len(self.feeders))
         # Set the correct neopixel color for each feeder at startup
         for feeder_sensor_idx, feeder_sensor in enumerate(self.feeder_sensors):
             if feeder_sensor.runout_helper.filament_present:
@@ -163,16 +191,16 @@ class Kms:
                 self.gcode.run_script_from_command("%s TOOL=T%s" % (self.MACRO_KMS_TOOL_STATUS_FREE, feeder_sensor_idx))
 
 
-    def _servo_up(self, servo: KMSServo, wait_moves=True, print_time=None):
-        if wait_moves:
-            self.toolhead.wait_moves()
-        servo.set_servo(angle=self.servo_angle_up, print_time=print_time)
+    # def _servo_up(self, servo: KMSServo, wait_moves=True, print_time=None):
+    #     if wait_moves:
+    #         self.toolhead.wait_moves()
+    #     servo.set_servo(angle=self.servo_angle_up, print_time=print_time)
 
-    def _servo_down(self, servo: KMSServo, toolhead_dwell=False):
-        self.toolhead.wait_moves()
-        servo.set_servo(angle = self.servo_angle_down)
-        if toolhead_dwell:
-            self.toolhead.dwell(self.servo_wait)
+    # def _servo_down(self, servo: KMSServo, toolhead_dwell=False):
+    #     self.toolhead.wait_moves()
+    #     servo.set_servo(angle = self.servo_angle_down)
+    #     if toolhead_dwell:
+    #         self.toolhead.dwell(self.servo_wait)
 
 
 def load_config(config):
