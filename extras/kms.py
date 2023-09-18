@@ -1,4 +1,10 @@
+# Klipper Material Shenanigans (KMS) Software - Main module
+#
+# Copyright (C) 2022  .doublet (discord)
 
+# Inspired by original ERCF and TradRack software
+# This file may be distributed under the terms of the GNU GPLv3 license.
+#
 
 class KMSServo:
     def __init__(self, servo, toolhead):
@@ -15,23 +21,42 @@ class KMSServo:
 
 
 class KMSFeeder:
-    def __init__(self, name: str, toolhead, sensor, stepper, servo:KMSServo):
+
+    SERVO_DOWN_STATE = 1
+    SERVO_UP_STATE = 0
+    SERVO_UNKNOWN_STATE = -1
+
+    def __init__(self, gcode, name: str, toolhead, sensor, stepper, servo:KMSServo):
         self.name = name
+        self.gcode = gcode
         self.toolhead = toolhead
         self.sensor = sensor
         self.stepper = stepper
         self.servo = servo
+        self.servo_state = self.servo_angle = self.SERVO_UNKNOWN_STATE
 
     def _servo_up(self, servo_angle_up, wait_moves=True, print_time=None):
         if wait_moves:
+            self.toolhead.dwell(0.2)
             self.toolhead.wait_moves()
         self.servo.set_servo(angle=servo_angle_up, print_time=print_time)
+        self.servo_angle = servo_angle_up
+        self.servo_state = self.SERVO_UP_STATE
 
-    def _servo_down(self, servo_angle_down, servo_wait, toolhead_dwell=False):
+    def _servo_down(self, servo_angle_down, servo_wait, toolhead_dwell=False, buzz_gear=True):
         self.toolhead.wait_moves()
         self.servo.set_servo(angle=servo_angle_down)
+        if self.servo_angle != servo_angle_down and buzz_gear:
+            oscillations = 4
+            for i in range(oscillations):
+                self.toolhead.dwell(0.05)
+                self.stepper.do_move(0.5, 25, 1000, False)
+                self.toolhead.dwell(0.05)
+                self.stepper.do_move(-0.5, 25, 1000, (i == oscillations - 1))       
         if toolhead_dwell:
             self.toolhead.dwell(servo_wait)
+        self.servo_angle = servo_angle_down
+        self.servo_state = self.SERVO_DOWN_STATE
 
 class Kms:
 
@@ -101,7 +126,7 @@ class Kms:
             feed_servo = self.printer.lookup_object("mmu_servo kms_feeder_servo_T%d" % (idx_tool), None)
             if feed_servo is None:
                 raise self.config.error("Missing [mmu_servo kms_feeder_servo_T%d] section in kms_hardware.cfg" % (idx_tool))  
-            self.feeders.append(KMSFeeder('T{}'.format(idx_tool), self.toolhead, feed_sensor, feed_stepper, KMSServo(feed_servo, self.toolhead)))
+            self.feeders.append(KMSFeeder(self.gcode, 'T{}'.format(idx_tool), self.toolhead, feed_sensor, feed_stepper, KMSServo(feed_servo, self.toolhead)))
 
         # Load all splitter sensors
         for idx_y_sensor in range(self.number_of_units):
@@ -137,6 +162,8 @@ class Kms:
             raise self.gcode.error("_KMS_LOAD_TOOL macro requires TOOL parameter")
         filament_loaded = 0
 
+        self.gcode.run_script_from_command("%s TOOL=T%s" % (self.MACRO_KMS_TOOL_STATUS_LOADING, tool_name))
+        self.toolhead.wait_moves()
         self.gcode.respond_info("KMS_LOAD_TOOL tool_name: T%s, filament_present: %s" % (tool_name, self._check_splitter_sensor(tool_name)))
         feeder = self.feeders[tool_name]
         feeder._servo_down(self.servo_angle_down, self.servo_wait)
@@ -149,6 +176,7 @@ class Kms:
                 filament_loaded = 1
                 feeder.stepper.do_set_position(0.)
                 feeder.stepper.do_move(-1 * self.load_retraction_length, self.load_moves_speed, self.load_moves_accel, False)
+                feeder.stepper.do_set_position(0.)
                 self.toolhead.wait_moves()
                 break
             else:
@@ -172,12 +200,42 @@ class Kms:
     def _update_status_startup(self):
         self.gcode.run_script_from_command("FLICKER")
         self.gcode.respond_info("self.feeders length: %d" % len(self.feeders))
+        self.gcode.respond_info("print status: %s" % self._get_print_status())
         for feeder_idx, feeder in enumerate(self.feeders):
             if feeder.sensor.runout_helper.filament_present:
                 self.gcode.run_script_from_command("%s TOOL=T%s" % (self.MACRO_KMS_TOOL_STATUS_READY, feeder_idx))
             else:
                 self.gcode.run_script_from_command("%s TOOL=T%s" % (self.MACRO_KMS_TOOL_STATUS_FREE, feeder_idx))
 
+
+    def _is_in_print(self):
+        return self._get_print_status() == "printing"
+
+
+    def _is_in_pause(self):
+        return self._get_print_status() == "paused"
+
+
+    def _is_in_standby(self):
+        return self._get_print_status() == "standby"
+
+
+    def _get_print_status(self):
+        try:
+            # If using virtual sdcard this is the most reliable method
+            source = "print_stats"
+            print_status = self.printer.lookup_object("print_stats").get_status(self.printer.get_reactor().monotonic())['state']
+        except:
+            # Otherwise we fallback to idle_timeout
+            source = "idle_timeout"
+            if self.printer.lookup_object("pause_resume").is_paused:
+                print_status = "paused"
+            else:
+                idle_timeout = self.printer.lookup_object("idle_timeout").get_status(self.printer.get_reactor().monotonic())
+                print_status = idle_timeout['state'].lower()
+        finally:
+            #self._log_trace("Determined print status as: %s from %s" % (print_status, source))
+            return print_status
 
 def load_config(config):
     return Kms(config)    	
