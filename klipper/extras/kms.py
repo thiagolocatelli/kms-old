@@ -199,14 +199,14 @@ class Kms:
             feeder = self.feeders[tool_name]
             try:
                 feeder._servo_down(self.servo_angle_down, self.servo_wait)
-                feeder.stepper.do_set_position(0.)
-                feeder.stepper.do_mh_homing_move(self.load_initial_length, self.load_moves_speed, self.load_moves_accel, 
-                                                 True, True, endstop_name=feeder.splitter_endstop_name)
-                self.toolhead.wait_moves()
-                feeder.stepper.do_set_position(0.)
-                feeder.stepper.do_move(-1 * self.load_retraction_length, self.load_moves_speed, self.load_moves_accel, False)
-                # feeder._home_filament_splitter(self.load_initial_length, self.load_moves_speed, 
-                #                                self.load_moves_accel, self.load_retraction_length)
+                # feeder.stepper.do_set_position(0.)
+                # feeder.stepper.do_mh_homing_move(self.load_initial_length, self.load_moves_speed, self.load_moves_accel, 
+                #                                  True, True, endstop_name=feeder.splitter_endstop_name)
+                # self.toolhead.wait_moves()
+                # feeder.stepper.do_set_position(0.)
+                # feeder.stepper.do_move(-1 * self.load_retraction_length, self.load_moves_speed, self.load_moves_accel, False)
+                feeder._home_filament_splitter(self.load_initial_length, self.load_moves_speed, 
+                                               self.load_moves_accel, self.load_retraction_length)
                 filament_loaded = True
             except Exception as e:
                 self.gcode.respond_info("Did not home: %s" % str(e))
