@@ -3,7 +3,7 @@
 W.I.P
 
 <p align="center">
-  <img src="images/kms.jpng" width="800">
+  <img src="images/kms.png" width="800">
 </p>
 
 
