@@ -2,12 +2,17 @@
 #
 # Copyright (C) 2022  .doublet (discord)
 
-# Inspired by original ERCF and TradRack software
+# Inspired by original ERCF, HappyHare v2 and TradRack software
 # This file may be distributed under the terms of the GNU GPLv3 license.
 #
 
+#from . import manual_stepper, manual_mh_stepper, manual_extruder_stepper
+from .manual_extruder_stepper import ManualExtruderStepper
+from .filament_switch_sensor import SwitchSensor
+from .mmu_servo import MmuServo
+
 class KMSServo:
-    def __init__(self, servo, toolhead):
+    def __init__(self, servo:MmuServo, toolhead):
         self.servo = servo
         self.toolhead = toolhead
 
@@ -26,8 +31,10 @@ class KMSFeeder:
     SERVO_UP_STATE = 0
     SERVO_UNKNOWN_STATE = -1
 
-    def __init__(self, gcode, name: str, toolhead, sensor, stepper, servo:KMSServo):
-        self.name = name
+    def __init__(self, index:int, gcode, toolhead, sensor:SwitchSensor, stepper:ManualExtruderStepper, servo:KMSServo):
+        self.name = "T{}".format(index)
+        self.splitter_endstop_name = "kms_splitter_endstop_{}".format(int(index/4 +1))
+        self.virtual_endstop_name = "kms_virtual_endstop_T{}".format(index)
         self.gcode = gcode
         self.toolhead = toolhead
         self.sensor = sensor
@@ -58,11 +65,24 @@ class KMSFeeder:
         self.servo_angle = servo_angle_down
         self.servo_state = self.SERVO_DOWN_STATE
 
-class Kms:
+    def _home_filament_splitter(self, load_initial_length, load_moves_speed, load_moves_accel, load_retraction_length):
+        self.stepper.do_set_position(0.)
+        self.stepper.do_mh_homing_move(load_initial_length, load_moves_speed, load_moves_accel, 
+                                            triggered=True, check_trigger=True, 
+                                            endstop_name=self.splitter_endstop_name)
+        self.toolhead.wait_moves()
+        self.stepper.do_set_position(0.)
+        self.stepper.do_move(-1 * load_retraction_length, load_moves_speed, 
+                                    load_moves_accel, False)
 
-    # Neopixel Macros
-    #MACRO_SERVO_UP = "_KMS_SERVO_UP"
-    #MACRO_SERVO_DOWN = "_KMS_SERVO_DOWN"
+    def _home_filament_toolhead(self, load_initial_length, load_moves_speed, load_moves_accel):
+        self.stepper.do_set_position(0.)
+        self.stepper.do_mh_homing_move(load_initial_length, load_moves_speed, load_moves_accel, 
+                                            triggered=True, check_trigger=True, 
+                                            endstop_name=self.virtual_endstop_name)
+        self.toolhead.wait_moves()
+
+class Kms:
 
     # Neopixel Macros
     MACRO_KMS_TOOL_STATUS_READY = "_KMS_TOOL_STATUS_READY"
@@ -70,6 +90,9 @@ class Kms:
     MACRO_KMS_TOOL_STATUS_RETRACTING = "_KMS_TOOL_STATUS_RETRACTING"
     MACRO_KMS_TOOL_STATUS_FREE = "_KMS_TOOL_STATUS_FREE"
     MACRO_KMS_TOOL_STATUS_ERROR = "_KMS_TOOL_STATUS_ERROR"
+
+    # KMS Variables
+    VAR_LOADED_TOOL = "kms_loaded_tool"
 
     def __init__(self, config):
         self.name = config.get_name().split()[-1]
@@ -102,14 +125,18 @@ class Kms:
         # Register KMS macros
         self.gcode.register_command('KMS_HELP', self.cmd_KMS_HELP, desc=self.cmd_KMS_HELP_help)
         self.gcode.register_command('_KMS_LOAD_TOOL', self.cmd_KMS_LOAD_TOOL, desc=self.cmd_KMS_LOAD_TOOL_help)
-        #self.gcode.register_command('_KMS_CHANGE_TOOL', self.cmd_KMS_CHANGE_TOOL, desc=self.cmd_KMS_CHANGE_TOOL_help)
         for tool_num in range(self.number_of_tools):
-            self.gcode.register_command('_T{}'.format(tool_num), self.cmd_SELECT_TOOL, desc=self.cmd_SELECT_TOOL_help)
+            self.gcode.register_command('T{}'.format(tool_num), self.cmd_SELECT_TOOL, desc=self.cmd_SELECT_TOOL_help)
 
 
     def handle_connect(self):
         self.toolhead = self.printer.lookup_object('toolhead') 
         self._setup_kms_hardware()     
+
+
+    cmd_KMS_HELP_help = "Display the complete set of MMU commands and function"
+    def cmd_KMS_HELP(self, gcmd):
+        self.gcode.respond_info("KMS_HELP test")
 
 
     def _setup_kms_hardware(self):
@@ -126,7 +153,7 @@ class Kms:
             feed_servo = self.printer.lookup_object("mmu_servo kms_feeder_servo_T%d" % (idx_tool), None)
             if feed_servo is None:
                 raise self.config.error("Missing [mmu_servo kms_feeder_servo_T%d] section in kms_hardware.cfg" % (idx_tool))  
-            self.feeders.append(KMSFeeder(self.gcode, 'T{}'.format(idx_tool), self.toolhead, feed_sensor, feed_stepper, KMSServo(feed_servo, self.toolhead)))
+            self.feeders.append(KMSFeeder(idx_tool, self.gcode, self.toolhead, feed_sensor, feed_stepper, KMSServo(feed_servo, self.toolhead)))
 
         # Load all splitter sensors
         for idx_y_sensor in range(self.number_of_units):
@@ -135,24 +162,27 @@ class Kms:
                 raise self.config.error("Missing [filament_switch_sensor kms_switch_sensor_splitter_%d] section in kms_hardware.cfg" % (idx_y_sensor + 1))  
             self.split_sensors.append(splitter_sensor)
 
-
-    cmd_KMS_HELP_help = "Display the complete set of MMU commands and function"
-    def cmd_KMS_HELP(self, gcmd):
-        self.gcode.respond_info("KMS_HELP test")
-
-
-    cmd_KMS_CHANGE_TOOL_help = "Move the filament to the Y splitter and retract"
-    def cmd_KMS_CHANGE_TOOL(self, gcmd):   
-        tool_name = gcmd.get_int('TOOL', None, minval=0)
-        if tool_name is None:
-            raise self.gcode.error("_KMS_CHANGE_TOOL macro requires TOOL parameter")
-        self.gcode.respond_info("KMS_CHANGE_TOOL tool = %s" % (tool_name)) 
+        # Sanity check to see that kms_vars.cfg is included. This will verify path because default has single entry
+        self.variables = self.printer.lookup_object('save_variables').allVariables
+        if self.variables == {}:
+            raise self.config.error("Calibration settings not found: mmu_vars.cfg probably not found. Check [save_variables] section in kms_software.cfg")    
 
 
     cmd_SELECT_TOOL_help = "Load filament from KMS into the toolhead with T<index> commands"
     def cmd_SELECT_TOOL(self, gcmd):
         tool = int(gcmd.get_command().partition('T')[2])
-        self.gcode.respond_info("cmd_SELECT_TOOL -> tool T%d" % tool)
+        feeder = self.feeders[tool]
+        loaded_tool = self._get_variable(self.VAR_LOADED_TOOL)
+        if loaded_tool == feeder.name:
+            self.gcode.respond_info("cmd_SELECT_TOOL -> tool %s already loaded" % (feeder.name))
+            return
+
+        # self._save_variable('test', 'xxx', True)
+        self._save_variable(self.VAR_LOADED_TOOL, feeder.name, True)
+        self.gcode.respond_info("cmd_SELECT_TOOL -> tool %s \nendstop: %s\nvendstop: %s\nloaded tool: %s" % (feeder.name, 
+                                                                                            feeder.splitter_endstop_name,
+                                                                                            feeder.virtual_endstop_name,
+                                                                                            loaded_tool))
     
 
     cmd_KMS_LOAD_TOOL_help = "Move the filament to the Y splitter and retract"
@@ -160,41 +190,36 @@ class Kms:
         tool_name = gcmd.get_int('TOOL', None, minval=0)
         if tool_name is None:
             raise self.gcode.error("_KMS_LOAD_TOOL macro requires TOOL parameter")
-        filament_loaded = 0
+        filament_loaded = False
 
-        self.gcode.run_script_from_command("%s TOOL=T%s" % (self.MACRO_KMS_TOOL_STATUS_LOADING, tool_name))
-        self.toolhead.wait_moves()
-        self.gcode.respond_info("KMS_LOAD_TOOL tool_name: T%s, filament_present: %s" % (tool_name, self._check_splitter_sensor(tool_name)))
-        feeder = self.feeders[tool_name]
-        feeder._servo_down(self.servo_angle_down, self.servo_wait)
-
-        feeder.stepper.do_set_position(0.)
-        feeder.stepper.do_move(self.load_initial_length, self.load_moves_speed, self.load_moves_accel, False)
-        self.toolhead.dwell(0.2)
-        for index in range(1, 40):
-            if self._check_splitter_sensor(tool_name) == 1:
-                filament_loaded = 1
+        if not self._is_in_print():
+            self.gcode.run_script_from_command("%s TOOL=T%s" % (self.MACRO_KMS_TOOL_STATUS_LOADING, tool_name))
+            self.toolhead.wait_moves()
+            self.gcode.respond_info("KMS_LOAD_TOOL tool_name: T%s, filament_present: %s" % (tool_name, self._check_splitter_sensor(tool_name)))
+            feeder = self.feeders[tool_name]
+            try:
+                feeder._servo_down(self.servo_angle_down, self.servo_wait)
+                feeder.stepper.do_set_position(0.)
+                feeder.stepper.do_mh_homing_move(self.load_initial_length, self.load_moves_speed, self.load_moves_accel, 
+                                                 True, True, endstop_name=feeder.splitter_endstop_name)
+                self.toolhead.wait_moves()
                 feeder.stepper.do_set_position(0.)
                 feeder.stepper.do_move(-1 * self.load_retraction_length, self.load_moves_speed, self.load_moves_accel, False)
-                feeder.stepper.do_set_position(0.)
-                self.toolhead.wait_moves()
-                break
+                # feeder._home_filament_splitter(self.load_initial_length, self.load_moves_speed, 
+                #                                self.load_moves_accel, self.load_retraction_length)
+                filament_loaded = True
+            except Exception as e:
+                self.gcode.respond_info("Did not home: %s" % str(e))
+            finally: 
+                feeder._servo_up(self.servo_angle_up)  
+
+            if filament_loaded:
+                self.gcode.run_script_from_command("%s TOOL=T%s" % (self.MACRO_KMS_TOOL_STATUS_READY, tool_name))
             else:
-                feeder.stepper.do_move(float(self.load_initial_length + (index * self.load_incremental_length)), self.load_moves_speed, self.load_moves_accel, False)
-                self.toolhead.wait_moves()
-
-        feeder._servo_up(self.servo_angle_up)
-        if filament_loaded:
-            self.gcode.run_script_from_command("%s TOOL=T%s" % (self.MACRO_KMS_TOOL_STATUS_READY, tool_name))
+                self.gcode.run_script_from_command("%s TOOL=T%s" % (self.MACRO_KMS_TOOL_STATUS_ERROR, tool_name))
+   
         else:
-            self.gcode.run_script_from_command("%s TOOL=T%s" % (self.MACRO_KMS_TOOL_STATUS_ERROR, tool_name))
-
-
-    def _check_splitter_sensor(self, tool_name):
-        if self.split_sensors[int(int(tool_name) / 4)].runout_helper.filament_present:
-            return 1
-        else:
-            return 0
+            self.gcode.respond_info("KMS tool T%s: Unable to load new filament during print" % (tool_name))
 
 
     def _update_status_startup(self):
@@ -206,6 +231,25 @@ class Kms:
                 self.gcode.run_script_from_command("%s TOOL=T%s" % (self.MACRO_KMS_TOOL_STATUS_READY, feeder_idx))
             else:
                 self.gcode.run_script_from_command("%s TOOL=T%s" % (self.MACRO_KMS_TOOL_STATUS_FREE, feeder_idx))
+
+
+    def _save_variable(self, name:str, value, is_str=True):
+        if is_str:
+            self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=%s VALUE='\"%s\"'" %  (name, str(value)))
+        else:
+            self.gcode.run_script_from_command("SAVE_VARIABLE VARIABLE=%s VALUE=%d" %  (name, value))
+
+
+    def _get_variable(self, name:str):
+        variables = self.printer.lookup_object('save_variables').allVariables
+        return variables.get(name, None)
+    
+
+    def _check_splitter_sensor(self, tool_name):
+        if self.split_sensors[int(int(tool_name) / 4)].runout_helper.filament_present:
+            return 1
+        else:
+            return 0
 
 
     def _is_in_print(self):
